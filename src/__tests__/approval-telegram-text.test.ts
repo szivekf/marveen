@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   buildBoundApprovalMessages,
   formatOutcomeText,
@@ -6,6 +6,9 @@ import {
   type EnvelopeView,
 } from '../web/approval-telegram-text.js'
 import { TEST_RUN_PREFIX } from '../test-run-marker.js'
+
+// The times are in the install zone (config.APP_TZ); the expectations below are Budapest time.
+vi.mock('../config.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../config.js')>()), APP_TZ: 'Europe/Budapest' }))
 
 // The notifier passes limit = 4096 - TEST_RUN_PREFIX.length, reserve = 300.
 const OPTS = { limit: 4096 - TEST_RUN_PREFIX.length, reserve: 300 }

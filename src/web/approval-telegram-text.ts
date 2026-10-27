@@ -13,6 +13,8 @@
 // the decision, the button message cannot be edited without losing its buttons.
 // A letter that needs chunks gets the plain, button-less notification instead.
 
+import { APP_TZ } from '../config.js'
+
 // The view the notifier builds from the verified envelope. Declared here so
 // this module does not depend on the envelope parser.
 export interface EnvelopeView {
@@ -56,8 +58,14 @@ export type BoundApprovalMessages = { chunks: string[]; final: string } | { unfi
 
 const HASH_PREFIX_LEN = 16
 
-function formatBudapest(epochSeconds: number): string {
-  return new Date(epochSeconds * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
+// Times the owner reads are in the install zone (config.APP_TZ), like every other owner-facing time (ISSUE1895).
+export function formatInstallTime(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ })
+}
+
+// The zone's short name for the outcome line: the last segment of the IANA name (Europe/Budapest -> Budapest).
+export function zoneLabel(): string {
+  return (APP_TZ.split('/').pop() ?? APP_TZ).replace(/_/g, ' ')
 }
 
 // Control, format and line/paragraph-separator characters (bidi overrides,
@@ -146,7 +154,7 @@ function identityLines(view: EnvelopeView, meta: BoundApprovalMeta): string[] {
 }
 
 function tailLines(meta: BoundApprovalMeta): string[] {
-  const expires = meta.timeoutAt != null ? formatBudapest(meta.timeoutAt) : 'nincs'
+  const expires = meta.timeoutAt != null ? formatInstallTime(meta.timeoutAt) : 'nincs'
   return [
     `Lejárat: ${expires}`,
     `Jóváhagyás után ${meta.windowMinutes} percig, egyszer küldhető el.`,
@@ -229,9 +237,9 @@ export function formatOutcomeText(
   resolvedAt: number,
   windowMinutes = 30,
 ): string {
-  const when = formatBudapest(resolvedAt)
+  const when = formatInstallTime(resolvedAt)
   if (status === 'approved') {
-    return `✅ Jóváhagyva: ${when} (Budapest). A levél ${windowMinutes} percen belül, egyszer küldhető el.`
+    return `✅ Jóváhagyva: ${when} (${zoneLabel()}). A levél ${windowMinutes} percen belül, egyszer küldhető el.`
   }
-  return `❌ Elutasítva: ${when} (Budapest).`
+  return `❌ Elutasítva: ${when} (${zoneLabel()}).`
 }

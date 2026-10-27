@@ -62,15 +62,21 @@ def _load(modname, filename):
 
 
 def is_send(gate, tool, tool_input):
-    """Is this call a send? The classifiers (_SEND_TOOL, _MULTIPLEX_TOOL, manage_email_is_send,
-    is_send_invocation) are the gate's own, imported. The BRANCHING that combines them is a rewrite of
-    scripts/hooks/email-approval-gate.py main(), lines 552-562 (if _SEND_TOOL ... elif Bash ... else),
-    and must be kept in step with it; the parity tests pin the common cases, not future drift."""
-    if gate._SEND_TOOL.search(tool):
-        return not (gate._MULTIPLEX_TOOL.search(tool) and not gate.manage_email_is_send(tool_input))
+    """Is this call a send? The classifiers (_MAYBE_MAIL_TOOL, scope_kind, manage_email_is_send,
+    _load_is_send_invocation) are the gate's own, used as they are. The BRANCHING that combines them is a
+    rewrite of scripts/hooks/email-approval-gate.py main() (the Bash branch, then the MCP branch: no mail
+    kind or a draft is no send, a manage_email call is a send only for a send operation, every other
+    kind is) and must be kept in step with it; the parity tests pin the common cases, not future drift."""
     if tool == "Bash":
         return bool(gate._load_is_send_invocation()(str(tool_input.get("command") or "")))
-    return False
+    if not gate._MAYBE_MAIL_TOOL.search(tool):
+        return False
+    kind = gate.scope_kind(tool)
+    if kind is None or kind == "draft":
+        return False
+    if kind == "manage_email":
+        return bool(gate.manage_email_is_send(tool_input))
+    return True
 
 
 def build(payload, agent, subject, gate, extract):

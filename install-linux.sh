@@ -1436,6 +1436,7 @@ if [ -f "$INSTALL_DIR/templates/CLAUDE.md.template" ]; then
     -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
     -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
     -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
+    -e "s|{{TIMEZONE}}|$(. "$INSTALL_DIR/scripts/lib/install-tz.sh"; z="$(install_tz "$INSTALL_DIR")"; printf '%s' "${z:-UTC}")|g" \
     "$INSTALL_DIR/templates/CLAUDE.md.template" >"$INSTALL_DIR/CLAUDE.md"
   ok "CLAUDE.md generalva"
 else
@@ -1468,15 +1469,23 @@ if [ -d "$SCHED_TPL_DIR" ]; then
       continue
     fi
     mkdir -p "$target"
-    for f in "$tpl"*; do
-      [ -f "$f" ] || continue
-      sed -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
-          -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
-          -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
-          -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
-          -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
-          "$f" > "$target/$(basename "$f")"
+    # SEEDREFDIR1018: a task may keep part of its text in a references/
+    # subdir that its SKILL.md points at; it ships with the same templating,
+    # or the pointer lands on a file that does not exist.
+    for sub in "" "references/"; do
+      [ -z "$sub" ] || [ -d "$tpl$sub" ] || continue
+      mkdir -p "$target/$sub"
+      for f in "$tpl$sub"*; do
+        [ -f "$f" ] || continue
+        sed -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
+            -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
+            -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
+            -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
+            -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
+            "$f" > "$target/$sub$(basename "$f")"
+      done
     done
+    INSTALL_SCHED_REGISTER="${INSTALL_SCHED_REGISTER:-} $task_name"
     ok "Utemezett feladat scaffoldolva: $task_name"
   done
 fi
@@ -1506,15 +1515,23 @@ if [ -d "$SEED_SCHED_DIR" ]; then
       continue
     fi
     mkdir -p "$target"
-    for f in "$tpl"*; do
-      [ -f "$f" ] || continue
-      sed -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
-          -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
-          -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
-          -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
-          -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
-          "$f" > "$target/$(basename "$f")"
+    # SEEDREFDIR1018: a task may keep part of its text in a references/
+    # subdir that its SKILL.md points at; it ships with the same templating,
+    # or the pointer lands on a file that does not exist.
+    for sub in "" "references/"; do
+      [ -z "$sub" ] || [ -d "$tpl$sub" ] || continue
+      mkdir -p "$target/$sub"
+      for f in "$tpl$sub"*; do
+        [ -f "$f" ] || continue
+        sed -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
+            -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
+            -e "s/{{OWNER_NAME}}/$OWNER_NAME/g" \
+            -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
+            -e "s/{{WEB_PORT}}/${WEB_PORT:-3420}/g" \
+            "$f" > "$target/$sub$(basename "$f")"
+      done
     done
+    INSTALL_SCHED_REGISTER="${INSTALL_SCHED_REGISTER:-} $task_name"
     SCHED_NEW=$((SCHED_NEW + 1))
   done
   if [ "$SCHED_NEW" -gt 0 ] || [ "$SCHED_SKIP" -gt 0 ]; then
@@ -1527,6 +1544,17 @@ if [ -d "$SEED_SCHED_DIR" ]; then
       ok "kanban-audit state inicializalva"
     fi
   fi
+fi
+
+# Scheduled-task registry: the schedule runner fires a task only if its
+# files hash-match the dashboard's registry. Register the tasks seeded above
+# (dist is already built at this point). On a FRESH install this is redundant
+# with the dashboard's one-time upgrade backfill; on a reinstall over an
+# existing box it is what keeps a newly seeded default firing.
+if [ -n "$(echo "${INSTALL_SCHED_REGISTER:-}" | tr -d ' ')" ] && [ -f "$INSTALL_DIR/dist/web/schedule-registry-cli.js" ] && command -v node >/dev/null 2>&1; then
+  # shellcheck disable=SC2086 # word-splitting the name list is intended
+  node "$INSTALL_DIR/dist/web/schedule-registry-cli.js" register --source installer $INSTALL_SCHED_REGISTER >/dev/null 2>&1 \
+    || echo "  WARN: scheduled-task registry registration failed; run: node $INSTALL_DIR/dist/web/schedule-registry-cli.js status"
 fi
 
 # Seed bumblebee threat-intel catalogs into ~/.claude/tools/
@@ -1671,6 +1699,17 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
     for f in "$skill_dir"*; do
       [ -f "$f" ] || continue
       cp "$f" "$target/$(basename "$f")"
+    done
+    # SEEDSKILLSUB1018: a skill's subdirs (scripts/, references/, ...) ship too,
+    # verbatim and with their mode bits; its SKILL.md points into them.
+    # Only the files git TRACKS: a whole-dir copy also carried untracked and
+    # ignored files, and fleet-helper's own scripts/.gitignore names exactly
+    # those as secrets/personal data (mail_rules.json, .dashboard-token).
+    # Outside a git checkout nothing below the top level is copied.
+    git -C "$skill_dir" ls-files -z 2>/dev/null | while IFS= read -r -d '' rel; do
+      case "$rel" in */*) ;; *) continue ;; esac   # top-level files: the loop above
+      mkdir -p "$target/$(dirname "$rel")"
+      cp -p "$skill_dir$rel" "$target/$rel"
     done
     SEED_NEW=$((SEED_NEW + 1))
   done
@@ -2042,7 +2081,9 @@ EOF
 # itself as a prompt injection (observed 2026-09-13, and it stamped the day as
 # delivered on the way out). The scheduled task runs inside the live channel
 # session, which has the allowlist. The unit files stay on disk so an operator
-# who wants the timer path can `systemctl --user enable --now <id>-morning.timer`.
+# who wants the timer path can `systemctl --user enable --now <id>-morning.timer`,
+# but only with ANTHROPIC_API_KEY in the install .env: morning-briefing.sh refuses
+# to run its headless `claude -p` on the subscription login (MORNTIMER2197, #2197).
 #
 # NO Requires=/Wants= on the service here: a [Unit] dependency on the
 # triggered service makes EVERY activation of the timer unit (each systemd
@@ -2274,6 +2315,24 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
     fi
   done
   [ "$SVCFAIL" -eq 0 ] && ok "Mindket szolgaltatas fut"
+  # TIMERSTART1011: `enable` alone does not start a timer. Both timers fire on
+  # OnBootSec=90s, which on a host that has been up for a while has already
+  # passed, so without a start they stay inactive until the next reboot. The
+  # keepalive probe then never refreshes, and the channel monitor reads the
+  # stale keep-alive as a wedged session and respawns the main agent (measured
+  # on a fresh Linux install: three hard restarts in 80 minutes). One start per
+  # timer, after the services, so a timer that failed to install can take down
+  # neither the services nor the other timer, and a failed start never stops the
+  # installer; not part of SVCFAIL, since the bridge itself runs, but named with
+  # the fix.
+  for tmr in "${KEEPALIVE_UNIT}.timer" "${INBOX_OBSERVER_UNIT}.timer"; do
+    systemctl --user start "$tmr" 2>/dev/null || true
+    if systemctl --user is-active --quiet "$tmr" 2>/dev/null; then
+      ok "$tmr fut"
+    else
+      warn "$tmr nem fut -- inditsd: systemctl --user start $tmr"
+    fi
+  done
 else
   warn "systemd --user nem elerheto (WSL / konteneren / VPS user-session nelkul) -- kozvetlen inditas."
   mkdir -p "$INSTALL_DIR/store"

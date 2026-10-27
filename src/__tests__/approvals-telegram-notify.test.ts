@@ -24,6 +24,7 @@ vi.mock('../config.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../config.js')>()
   return {
     ...real,
+    APP_TZ: 'Europe/Budapest', // the outcome lines are in the install zone; the expectations are Budapest time
     MAIN_AGENT_ID: 'marveen',
     get TELEGRAM_BOT_TOKEN() { return state.token },
     get ALLOWED_CHAT_ID() { return state.allowedChatId },

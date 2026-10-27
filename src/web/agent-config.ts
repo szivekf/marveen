@@ -484,6 +484,50 @@ export function readAgentStateObserver(name: string): boolean {
   return false
 }
 
+// ---- per-agent sender-role gate (hook wiring) --------------------------------
+//
+// The gate itself is scripts/hooks/sender-role-gate.py, a PreToolUse hook that
+// denies the configured risky tools whenever the current turn carries a chat
+// envelope from a sender who is not an owner. These decide whether
+// the launcher WIRES that hook for the agent: the key must be present and not
+// be the explicit "off" shape (riskyTools missing or empty). A malformed
+// value (string, null, array, non-array riskyTools) deliberately returns
+// TRUE -- the hook gets wired and fails closed on its side -- while an
+// unparseable file returns false, matching how the rest of the launcher
+// already treats a broken agent-config.json.
+
+// PURE: takes the parsed agent-config.json value, no I/O.
+export function senderRoleGateEnabled(config: unknown): boolean {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return false
+  const cfg = config as Record<string, unknown>
+  if (!Object.hasOwn(cfg, 'senderRoleGate')) return false
+  const gate = cfg.senderRoleGate
+  if (!gate || typeof gate !== 'object' || Array.isArray(gate)) return true
+  const risky = (gate as Record<string, unknown>).riskyTools
+  if (risky === undefined) return false
+  if (Array.isArray(risky) && risky.length === 0) return false
+  return true
+}
+
+// The hook's --policy argument: base64url (no padding) of the senderRoleGate value, or null when the gate
+// is off. The launcher copies the table into the generated settings.json at the agent's start, so an edit
+// the agent makes to its own agent-config.json during the session does not change the running gate.
+// base64url keeps the argument inside the hook-argument charset ([A-Za-z0-9_-]).
+export function senderRoleGatePolicyArg(config: unknown): string | null {
+  if (!senderRoleGateEnabled(config)) return null
+  const value = (config as Record<string, unknown>).senderRoleGate
+  return Buffer.from(JSON.stringify(value), 'utf-8').toString('base64url')
+}
+
+export function readAgentSenderRoleGatePolicy(name: string): string | null {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    return senderRoleGatePolicyArg(JSON.parse(readFileOr(configPath, '{}')))
+  } catch {
+    return null
+  }
+}
+
 // Opt-in per-agent worksource channel (default OFF). When true the router hands
 // inter-agent messages to this agent by writing a file into its worksource
 // queue instead of typing them into its tmux pane, and the launcher loads the
@@ -504,6 +548,39 @@ export function readAgentWorksourceChannel(name: string): boolean {
     return config.worksourceChannel === true
   } catch { /* fall through */ }
   return false
+}
+
+// Opt-in PULL delivery: the agent runs on its OWN machine and fetches its
+// messages over the HTTP API with a scoped token, so this install never sees a
+// tmux session for it. That is not a worksource agent: worksource writes items
+// into a local queue DIRECTORY and proves itself with a live pane, neither of
+// which exists here. The distinction matters because every tmux-shaped gate in
+// the router ("session absent", "session busy", "session stuck") is a statement
+// about a KEYBOARD this install does not own, and the abandon gate is the
+// destructive one: it flips the row to `failed`, which REMOVES it from the
+// `status=pending` inbox the agent polls. Measured 2026-09-20 on this install:
+// messages 293, 294, 300, 307 and 308 to a remote pull agent were all failed
+// this way after the 60-minute window, and the recipient could not see them at
+// all -- the owner had to nudge him over a chat channel each time. For a pull
+// agent the row simply stays pending until HE closes it.
+export function readAgentPullDelivery(name: string): boolean {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    return config.pullDelivery === true
+  } catch { /* fall through */ }
+  return false
+}
+
+// Persist the opt-in pullDelivery flag. `false` removes the key so the config
+// file stays minimal and the default-OFF semantics remain explicit.
+export function writeAgentPullDelivery(name: string, enabled: boolean): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let config: Record<string, unknown> = {}
+  config = readJsonObjectForWrite(configPath)
+  if (enabled) config.pullDelivery = true
+  else delete config.pullDelivery
+  atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
 // Persist the opt-in worksourceChannel flag. `false` removes the key so the
@@ -593,7 +670,12 @@ export const HIDDEN_AGENT_SENTINEL = '.hidden-from-dashboard'
  */
 export function listAllAgentNames(): string[] {
   if (!existsSync(AGENTS_BASE_DIR)) return []
+  // The main agent has no agents/<id> directory: it runs in the channels
+  // session. A directory of that name (old drafts left in agents/marveen) is
+  // not a sub-agent, and listing it gave the team graph a second, stopped
+  // 'marveen' node that replaced the main one (MAINGHOST1024).
   return readdirSync(AGENTS_BASE_DIR).filter((f) => {
+    if (f === MAIN_AGENT_ID) return false
     try { return statSync(join(AGENTS_BASE_DIR, f)).isDirectory() } catch { return false }
   })
 }

@@ -9,7 +9,7 @@ import { logger } from '../logger.js'
 import { launchableInstallDefaultSync, launchableDistributionDefaultSync } from './default-model-guard.js'
 import { measureClaudeCliVersionSync } from './claude-cli-version.js'
 import { CLAUDE_MODEL_MIN_CLI, baseModelId, isModelUnsupportedByCli } from '../claude-cli-support.js'
-import { MAIN_AGENT_ID, PROJECT_ROOT, DEFAULT_AGENT_MODEL, DEFAULT_AGENT_MODEL_IS_DISTRIBUTION } from '../config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT, DEFAULT_AGENT_MODEL, DEFAULT_AGENT_MODEL_IS_DISTRIBUTION, WORKER_AUTOUPDATE } from '../config.js'
 import {
   capturePane,
   isSessionReadyForPrompt,
@@ -201,6 +201,43 @@ export function workerHomeFor(agentId: string, variant: 'slow' | 'fast'): string
  */
 export function workerStartAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
   return env['WEB_ONLY'] !== 'true'
+}
+
+/**
+ * WORKERAUTOUPDATE1011: the worker launch line's auto-updater clause.
+ *
+ * Both workers used to launch WITHOUT DISABLE_AUTOUPDATER. channels.sh exports
+ * it and also sets it in the tmux global env, but -g only reaches sessions
+ * created AFTER it: after a reboot the dashboard's worker session is usually
+ * what creates the tmux server, so both workers came up with a live updater
+ * (measured 2026-10-11: two updater-enabled workers 14s before a native
+ * 2.1.296 landed and the launcher symlink moved, while channels and every
+ * sub-agent had the variable). So the clause is explicit, never inherited.
+ *
+ * Default: every worker is pinned. With WORKER_AUTOUPDATE on a native install,
+ * the SLOW worker alone is the designated updater -- `unset`, not merely "no
+ * export", because the tmux global env may still carry the variable.
+ */
+export function workerAutoUpdaterEnv(i: { role: 'slow' | 'fast'; optIn: boolean; nativeInstall: boolean }): string {
+  return i.role === 'slow' && i.optIn && i.nativeInstall
+    ? 'unset DISABLE_AUTOUPDATER; '
+    : 'export DISABLE_AUTOUPDATER=1; '
+}
+
+/**
+ * True when `bin` resolves into the native installer's versions dir
+ * (~/.local/share/claude/versions/<v>). Mirrors claude_is_native in
+ * channels.sh: on an npm-global install the in-process updater would race the
+ * boot-time claude_ensure, so the opt-in is honoured on native installs only.
+ */
+export function isNativeClaudeBin(bin: string | null, home: string = homedir()): boolean {
+  if (!bin) return false
+  try {
+    const root = realpathSync(join(home, '.local', 'share', 'claude', 'versions'))
+    return realpathSync(bin).startsWith(root + '/')
+  } catch {
+    return false
+  }
 }
 
 // Slow session: long-running tasks (analysis, reports, search). The original
@@ -408,6 +445,26 @@ function lstatSyncSafe(p: string): ReturnType<typeof lstatSync> | null {
 
 interface WorkerSettings { enabledPlugins?: Record<string, boolean>; [k: string]: unknown }
 
+/** The fleet-freeze PreToolUse gate in the worker's own settings (KILLSWITCH1022). */
+export const WORKER_FREEZE_GATE_CMD = `bash "${join(PROJECT_ROOT, 'scripts', 'hooks', 'fleet-freeze-gate.sh')}"`
+
+/**
+ * KILLSWITCH1022: the worker runs tools too (--dangerously-skip-permissions),
+ * and its cwd is outside the project, so the project .claude/settings.json never
+ * reaches it. The fleet-freeze gate goes into its OWN settings, first in
+ * PreToolUse: every other entry (and every other hook event) Claude Code may have
+ * written is kept, and the gate entry is replaced, never duplicated.
+ */
+export function withFleetFreezeGate(settings: WorkerSettings): WorkerSettings {
+  const hooks = (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks) ? settings.hooks : {}) as Record<string, unknown>
+  const pre = (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []) as unknown[]
+  const preToolUse = [
+    { matcher: '*', hooks: [{ type: 'command', command: WORKER_FREEZE_GATE_CMD, timeout: 5 }] },
+    ...pre.filter((e) => !JSON.stringify(e).includes('fleet-freeze-gate.sh')),
+  ]
+  return { ...settings, hooks: { ...hooks, PreToolUse: preToolUse } }
+}
+
 /**
  * Build (idempotently) the worker's isolated cwd + CLAUDE_CONFIG_DIR:
  *  - empty project .mcp.json (defense in depth);
@@ -479,7 +536,7 @@ export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow): void {
   // skipDangerousModePermissionPrompt: suppress the "Bypass Permissions mode"
   // first-run warning so the headless worker (launched with
   // --dangerously-skip-permissions) reaches its prompt without a blocking modal.
-  writeFileSync(settingsPath, JSON.stringify({ ...current, enabledPlugins, skipDangerousModePermissionPrompt: true }, null, 2) + '\n')
+  writeFileSync(settingsPath, JSON.stringify(withFleetFreezeGate({ ...current, enabledPlugins, skipDangerousModePermissionPrompt: true }), null, 2) + '\n')
 
   // Subscription auth: materialise the host login JSON as .credentials.json AND
   // clear the stale path-hashed Keychain entry that would shadow it (see the
@@ -623,9 +680,18 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
   }
 
   const claudeLaunchBin = tryResolveFromPath('claude') ?? 'claude'
+  const autoUpdaterEnv = workerAutoUpdaterEnv({
+    role: ctx === ctxSlow ? 'slow' : 'fast',
+    optIn: WORKER_AUTOUPDATE,
+    nativeInstall: isNativeClaudeBin(tryResolveFromPath('claude')),
+  })
+  if (WORKER_AUTOUPDATE && ctx === ctxSlow && autoUpdaterEnv.startsWith('export')) {
+    logger.warn({ session: ctx.session }, 'WORKERAUTOUPDATE1011: WORKER_AUTOUPDATE is on but claude is not a native install; the slow worker stays pinned')
+  }
   const launch =
     (hasFleetOauthToken() ? `export CLAUDE_CODE_OAUTH_TOKEN="$(cat ${shArg(FLEET_OAUTH_TOKEN_PATH)})"; ` : '') +
     `export CLAUDE_CONFIG_DIR=${shArg(ctx.configDir)}; ` +
+    autoUpdaterEnv +
     `export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false; ` +
     // CHANSPARE925: no Agent view (Left would background the worker into the daemon).
     `export CLAUDE_CODE_DISABLE_AGENT_VIEW=1; ` +

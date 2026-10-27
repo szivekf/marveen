@@ -17,6 +17,7 @@ vi.mock('../config.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../config.js')>()
   return {
     ...real,
+    APP_TZ: 'Europe/Budapest', // the outcome lines are in the install zone; the expectations are Budapest time
     MAIN_AGENT_ID: 'agent-a',
     TELEGRAM_BOT_TOKEN: '',
     get ALLOWED_CHAT_ID() { return state.allowedChatId },
@@ -69,7 +70,7 @@ const storedHashes = (id: string) =>
 const UNBOUND = { approved: null, rejected: null }
 const LEGACY_RESERVED = { error: 'resolved_by may not use the reserved owner:telegram: prefix' }
 
-function fakeCall(method: string, path: string, rawBody: string): { ctx: RouteContext; out: { status: number; body: any; raw: string } } {
+function fakeCall(method: string, path: string, rawBody: string, auth?: RouteContext['auth']): { ctx: RouteContext; out: { status: number; body: any; raw: string } } {
   const out: { status: number; body: any; raw: string } = { status: 0, body: null, raw: '' }
   const res: any = {
     writeHead(status: number) { out.status = status; return res },
@@ -82,11 +83,14 @@ function fakeCall(method: string, path: string, rawBody: string): { ctx: RouteCo
       if (event === 'end') cb()
     },
   }
-  return { ctx: { req, res, path, method, url } as RouteContext, out }
+  return { ctx: { req, res, path, method, url, ...(auth ? { auth } : {}) } as RouteContext, out }
 }
 
+// The legacy PATCH is the dashboard's: an approve takes the owner's session (80d0e3c6), so the
+// stand-in caller is the owner's session. The button press (decide) carries no auth, as before:
+// its decision is bound to the nonce, not to the caller.
 function fakePatch(id: string, body: unknown) {
-  return fakeCall('PATCH', `/api/approvals/${id}`, JSON.stringify(body))
+  return fakeCall('PATCH', `/api/approvals/${id}`, JSON.stringify(body), { kind: 'session', user: 'owner' })
 }
 
 // The button press as the plugin sends it: POST /api/approvals/:id/telegram.
